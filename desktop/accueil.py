@@ -1,18 +1,19 @@
-"""Écran d'accueil : votre IP, rejoindre un salon par IP ou par découverte, ou en créer un."""
+"""Écran d'accueil : présentation et IP à gauche, connexion au salon à droite."""
 
 from __future__ import annotations
 
-import getpass
 import threading
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtWidgets import QApplication, QGridLayout, QHBoxLayout, QLineEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication, QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLineEdit, QVBoxLayout, QWidget,
+)
 
 from chat.decouverte import decouvrir, ip_locale, normaliser
-from chat.protocole import pseudo_valide
+from chat.protocole import PORT_DEFAUT, mot_de_passe_valide, pseudo_valide
 
-from . import theme
-from .widgets import Verre, bouton, bouton_icone, label
+from . import reglages, theme
+from .widgets import Carte, bouton, bouton_icone, label
 
 
 class _Signaux(QObject):
@@ -20,8 +21,9 @@ class _Signaux(QObject):
 
 
 class Accueil(QWidget):
-    rejoindre = Signal(str, str, str)  # url, pseudo, nom du salon
-    creer = Signal(str)                # pseudo
+    rejoindre = Signal(str, str, str, bool, str)  # url, utilisateur, mot de passe, nouveau compte, nom
+    heberger = Signal(str, str, bool)             # utilisateur, mot de passe, nouveau compte
+    parametres = Signal()
 
     def __init__(self):
         super().__init__()
@@ -32,26 +34,42 @@ class Accueil(QWidget):
         self.rechercher()
 
     def _construire(self) -> None:
-        externe = QGridLayout(self)
-        externe.setContentsMargins(32, 32, 32, 32)
-        carte = Verre(marges=40, espacement=40, horizontal=True)
-        carte.setMaximumSize(1040, 640)
-        externe.addWidget(carte, 0, 0, Qt.AlignCenter)
+        externe = QVBoxLayout(self)
+        externe.setContentsMargins(24, 16, 24, 24)
+        haut = QHBoxLayout()
+        haut.addStretch()
+        reglages_btn = bouton_icone("settings", "Paramètres (photo de profil, thème)", 40)
+        reglages_btn.clicked.connect(self.parametres)
+        haut.addWidget(reglages_btn)
+        externe.addLayout(haut)
 
-        # Colonne gauche : identité + votre IP + créer
+        centre = QGridLayout()
+        externe.addLayout(centre, 1)
+        contenu = QWidget()
+        contenu.setMaximumWidth(1000)
+        centre.addWidget(contenu, 0, 0, Qt.AlignCenter)
+        colonnes = QHBoxLayout(contenu)
+        colonnes.setSpacing(64)
+
+        # Gauche : identité + votre IP
         gauche = QVBoxLayout()
-        gauche.setSpacing(16)
+        gauche.setSpacing(14)
+        gauche.addStretch()
+        marque = QHBoxLayout()
+        marque.setSpacing(14)
         logo = label()
-        logo.setPixmap(theme.logo(76))
-        gauche.addWidget(logo)
-        gauche.addWidget(label("LocalNet", "titre"))
-        accroche = label("Discutez et partagez photos et vidéos avec les appareils de votre réseau. "
-                         "Rien ne sort de chez vous.", "doux")
+        logo.setPixmap(theme.logo(64))
+        marque.addWidget(logo)
+        marque.addWidget(label("LocalNet", "logo-titre"))
+        marque.addStretch()
+        gauche.addLayout(marque)
+        accroche = label("Discutez et partagez photos et vidéos avec les appareils de votre réseau.",
+                         "accroche")
         accroche.setWordWrap(True)
         gauche.addWidget(accroche)
-        gauche.addSpacing(8)
+        gauche.addSpacing(10)
 
-        bloc_ip = Verre(marges=18, espacement=4, fin=True)
+        bloc_ip = Carte(marges=18, espacement=4)
         bloc_ip.lay.addWidget(label("VOTRE ADRESSE IP", "section"))
         ligne_ip = QHBoxLayout()
         ligne_ip.addWidget(label(self.ip, "ip"))
@@ -60,93 +78,130 @@ class Accueil(QWidget):
         self.copier.clicked.connect(self._copier_ip)
         ligne_ip.addWidget(self.copier)
         bloc_ip.lay.addLayout(ligne_ip)
-        self.aide_ip = label("Les autres vous rejoignent avec cette IP une fois le salon créé.", "petit")
-        self.aide_ip.setWordWrap(True)
-        bloc_ip.lay.addWidget(self.aide_ip)
+        aide = label("Hébergez un salon : les autres le rejoignent avec cette IP.", "petit")
+        aide.setWordWrap(True)
+        bloc_ip.lay.addWidget(aide)
         gauche.addWidget(bloc_ip)
         gauche.addStretch()
+        colonnes.addLayout(gauche, 1)
 
-        self.bouton_creer = bouton("Créer un salon sur ce PC", icone="plus")
-        self.bouton_creer.clicked.connect(self._creer)
-        gauche.addWidget(self.bouton_creer)
+        # Droite : carte de connexion
+        carte = Carte(marges=24, espacement=10)
+        carte.setFixedWidth(420)
+        onglets = QHBoxLayout()
+        onglets.setSpacing(6)
+        self.groupe = QButtonGroup(self)
+        self.onglet_connexion = bouton("Se connecter", "onglet", icone="log-in")
+        self.onglet_creation = bouton("Créer un compte", "onglet", icone="user-plus")
+        for b in (self.onglet_connexion, self.onglet_creation):
+            b.setCheckable(True)
+            b.clicked.connect(self._mode)
+            self.groupe.addButton(b)
+            onglets.addWidget(b, 1)
+        carte.lay.addLayout(onglets)
+        carte.lay.addSpacing(6)
 
-        # Colonne droite : pseudo + rejoindre
-        droite = QVBoxLayout()
-        droite.setSpacing(10)
-        droite.addWidget(label("VOTRE PSEUDO", "section"))
-        self.pseudo = QLineEdit(getpass.getuser() if pseudo_valide(getpass.getuser()) else "")
-        self.pseudo.setPlaceholderText("ex. alice")
-        self.pseudo.setMaxLength(20)
-        droite.addWidget(self.pseudo)
-        droite.addSpacing(14)
-
-        droite.addWidget(label("REJOINDRE PAR IP", "section"))
-        ligne = QHBoxLayout()
-        ligne.setSpacing(10)
+        self.utilisateur = QLineEdit(reglages.lire("utilisateur"))
+        self.utilisateur.setPlaceholderText("Nom d'utilisateur")
+        self.utilisateur.setMaxLength(20)
+        self.mot_de_passe = QLineEdit()
+        self.mot_de_passe.setPlaceholderText("Mot de passe")
+        self.mot_de_passe.setEchoMode(QLineEdit.Password)
+        self.mot_de_passe.setMaxLength(64)
         self.adresse = QLineEdit()
-        self.adresse.setPlaceholderText("192.168.1.42")
-        self.adresse.returnPressed.connect(self._rejoindre_ip)
-        ligne.addWidget(self.adresse, 1)
-        aller = bouton("Rejoindre", icone="arrow-right")
-        aller.clicked.connect(self._rejoindre_ip)
-        ligne.addWidget(aller)
-        droite.addLayout(ligne)
-        droite.addSpacing(14)
+        self.adresse.setPlaceholderText("IP du salon, ex. 192.168.1.42")
+        for champ in (self.utilisateur, self.mot_de_passe, self.adresse):
+            champ.returnPressed.connect(self._rejoindre)
+            carte.lay.addWidget(champ)
 
+        self.valider = bouton("Se connecter")
+        self.valider.clicked.connect(self._rejoindre)
+        carte.lay.addWidget(self.valider)
+        self.message = label("", "erreur")
+        self.message.setWordWrap(True)
+        self.message.hide()
+        carte.lay.addWidget(self.message)
+
+        carte.lay.addWidget(self._separation())
         entete = QHBoxLayout()
         entete.addWidget(label("SALONS DÉTECTÉS", "section"))
         entete.addStretch()
-        self.actualiser = bouton_icone("refresh-cw", "Chercher à nouveau", 30)
+        self.actualiser = bouton_icone("refresh-cw", "Chercher à nouveau", 32)
         self.actualiser.clicked.connect(self.rechercher)
         entete.addWidget(self.actualiser)
-        droite.addLayout(entete)
+        carte.lay.addLayout(entete)
         self.liste = QVBoxLayout()
-        self.liste.setSpacing(8)
-        droite.addLayout(self.liste)
-        droite.addStretch()
+        self.liste.setSpacing(6)
+        carte.lay.addLayout(self.liste)
 
-        self.message = label("", "erreur")
-        self.message.setWordWrap(True)
-        droite.addWidget(self.message)
+        carte.lay.addWidget(self._separation())
+        self.bouton_heberger = bouton("Héberger un salon sur ce PC", "vert", icone="plus")
+        self.bouton_heberger.clicked.connect(self._heberger)
+        carte.lay.addWidget(self.bouton_heberger)
+        colonnes.addWidget(carte, 0, Qt.AlignVCenter)
 
-        carte.lay.addLayout(gauche, 5)
-        carte.lay.addLayout(droite, 6)
+        (self.onglet_connexion if self.utilisateur.text() else self.onglet_creation).setChecked(True)
+        self._mode()
+
+    @staticmethod
+    def _separation() -> QFrame:
+        trait = QFrame()
+        trait.setObjectName("separation")
+        trait.setFixedHeight(1)
+        return trait
+
+    def _mode(self) -> None:
+        nouveau = self.onglet_creation.isChecked()
+        self.valider.setText("Créer le compte et rejoindre" if nouveau else "Se connecter")
+        self.mot_de_passe.setPlaceholderText("Mot de passe (4 caractères min.)" if nouveau else "Mot de passe")
+        self.erreur("")
 
     # --- Actions ------------------------------------------------------------
 
-    def _pseudo(self) -> str | None:
-        pseudo = self.pseudo.text().strip()
-        if pseudo_valide(pseudo):
-            return pseudo
-        self.erreur("Pseudo : 1 à 20 caractères (lettres, chiffres, « . », « _ », « - »).")
-        self.pseudo.setFocus()
-        return None
+    def _identifiants(self) -> tuple[str, str, bool] | None:
+        pseudo, mdp = self.utilisateur.text().strip(), self.mot_de_passe.text()
+        if not pseudo_valide(pseudo):
+            self.erreur("Nom d'utilisateur : 1 à 20 caractères (lettres, chiffres, « . », « _ », « - »).")
+            self.utilisateur.setFocus()
+            return None
+        if not mot_de_passe_valide(mdp):
+            self.erreur("Le mot de passe doit faire de 4 à 64 caractères.")
+            self.mot_de_passe.setFocus()
+            return None
+        reglages.ecrire("utilisateur", pseudo)
+        return pseudo, mdp, self.onglet_creation.isChecked()
 
-    def _rejoindre_ip(self) -> None:
+    def _rejoindre(self) -> None:
+        if not (ids := self._identifiants()):
+            return
         adresse = self.adresse.text().strip()
         if not adresse:
+            self.erreur("Entrez l'IP du salon, choisissez un salon détecté ou hébergez-en un.")
             self.adresse.setFocus()
             return
-        if pseudo := self._pseudo():
-            self.rejoindre.emit(normaliser(adresse), pseudo, adresse)
+        self.rejoindre.emit(normaliser(adresse), *ids, adresse)
 
-    def _creer(self) -> None:
-        if pseudo := self._pseudo():
-            self.bouton_creer.setEnabled(False)
-            self.bouton_creer.setText("Ouverture du salon…")
-            self.creer.emit(pseudo)
+    def _heberger(self) -> None:
+        if ids := self._identifiants():
+            self.bouton_heberger.setEnabled(False)
+            self.bouton_heberger.setText("Ouverture du salon…")
+            self.heberger.emit(*ids)
 
-    def creation_finie(self) -> None:
-        self.bouton_creer.setEnabled(True)
-        self.bouton_creer.setText("Créer un salon sur ce PC")
+    def hebergement_fini(self) -> None:
+        self.bouton_heberger.setEnabled(True)
+        self.bouton_heberger.setText("Héberger un salon sur ce PC")
 
     def _copier_ip(self) -> None:
         QApplication.clipboard().setText(self.ip)
-        self.copier.setIcon(theme.icone("copy", theme.SAUGE, 20))
-        QTimer.singleShot(1200, lambda: self.copier.setIcon(theme.icone("copy", theme.TEXTE, 20)))
+        self.copier.setIcon(theme.icone("copy", theme.VERT, 20))
+        QTimer.singleShot(1200, lambda: self.copier.setIcon(theme.icone("copy", theme.c("doux"), 20)))
 
     def erreur(self, texte: str) -> None:
         self.message.setText(texte)
+        self.message.setVisible(bool(texte))
+
+    def vider_mot_de_passe(self) -> None:
+        self.mot_de_passe.clear()
 
     # --- Découverte mDNS ----------------------------------------------------
 
@@ -165,9 +220,11 @@ class Accueil(QWidget):
         self._vider()
         self.actualiser.setEnabled(True)
         if not salons:
-            self.liste.addWidget(label("Aucun salon annoncé. Entrez une IP ou créez-en un.", "petit"))
+            self.liste.addWidget(label("Aucun salon annoncé pour l'instant.", "petit"))
             return
         for nom, url in salons:
-            b = bouton(f"{nom}    ·    {url.removeprefix('ws://')}", "salon", icone="wifi")
-            b.clicked.connect(lambda _=False, u=url, n=nom: (p := self._pseudo()) and self.rejoindre.emit(u, p, n))
+            ip = url.removeprefix("ws://").removesuffix(f":{PORT_DEFAUT}")
+            b = bouton(f"{nom}  ·  {ip}", "salon", icone="wifi")
+            b.setToolTip("Utiliser ce salon")
+            b.clicked.connect(lambda _=False, a=ip: self.adresse.setText(a))
             self.liste.addWidget(b)

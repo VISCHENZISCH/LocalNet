@@ -1,14 +1,17 @@
 """Protocole du salon : JSON sur WebSocket, fichiers en trames binaires.
 
 Client -> serveur
-    {"type": "bonjour", "pseudo": "..."}                    premier message, obligatoire
+    {"type": "bonjour", "pseudo", "mot_de_passe", "nouveau": bool}
+        premier message, obligatoire ; nouveau = créer le compte sur ce salon
+    {"type": "avatar", "donnees": "<JPEG ou PNG en base64>" | null}
     {"type": "message", "texte": "..."}
     {"type": "fichier", "id": "ab12cd34", "nom": "...", "taille": 123}
         suivi de trames binaires : 8 octets d'id (ASCII) + morceau du fichier,
         jusqu'à atteindre la taille annoncée.
 
 Serveur -> client
-    {"type": "bienvenue", "pseudo", "membres", "historique"}
+    {"type": "bienvenue", "pseudo", "membres", "historique", "avatars"}
+    {"type": "avatars", "avatars": {pseudo: id}}            photo à GET /avatars/<id>
     {"type": "message", "de", "texte", "heure"}
     {"type": "fichier", "de", "id", "nom", "taille", "genre", "heure"}
         genre : "image" | "video" ; contenu à GET http://<serveur>/fichiers/<id>
@@ -31,6 +34,8 @@ TAILLE_MORCEAU = 256 * 1024  # octets de fichier par trame binaire
 TAILLE_ID = 8
 FICHIER_MAX = 500 * 1024 * 1024
 CHEMIN_FICHIERS = "/fichiers/"
+CHEMIN_AVATARS = "/avatars/"
+AVATAR_MAX = 400 * 1024  # octets ; le client envoie une photo 256×256
 
 EXTENSIONS = {
     "image": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"},
@@ -42,6 +47,10 @@ _PSEUDO = re.compile(r"[\w.-]{1,20}")
 
 def pseudo_valide(pseudo: object) -> bool:
     return isinstance(pseudo, str) and _PSEUDO.fullmatch(pseudo) is not None
+
+
+def mot_de_passe_valide(mdp: object) -> bool:
+    return isinstance(mdp, str) and 4 <= len(mdp) <= 64
 
 
 def genre(nom: str) -> str | None:

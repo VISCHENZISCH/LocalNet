@@ -6,6 +6,8 @@ mémoire) et sont téléchargés en HTTP depuis le serveur, avec un cache local.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 import secrets
 import signal
@@ -15,12 +17,16 @@ from pathlib import Path
 from typing import BinaryIO, Callable
 
 from PySide6.QtCore import QObject, QProcess, QStandardPaths, QTimer, QUrl, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWebSockets import QWebSocket
 
 from chat.protocole import (
-    CHEMIN_FICHIERS, FICHIER_MAX, TAILLE_MORCEAU, decoder, encoder, genre, nom_sur, taille_lisible,
+    CHEMIN_AVATARS, CHEMIN_FICHIERS, FICHIER_MAX, TAILLE_MORCEAU, decoder, encoder, genre, nom_sur,
+    taille_lisible,
 )
+
+from . import reglages
 
 RACINE = Path(__file__).resolve().parent.parent
 
@@ -29,6 +35,55 @@ def dossier_cache() -> Path:
     d = Path(QStandardPaths.writableLocation(QStandardPaths.CacheLocation)) / "fichiers"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+class Photos(QObject):
+    """Photos de profil des membres, téléchargées une fois puis gardées en mémoire."""
+
+    modifie = Signal(str)  # pseudo dont la photo a changé
+
+    def __init__(self, reseau: QNetworkAccessManager):
+        super().__init__()
+        self.reseau = reseau
+        self.ids: dict[str, str] = {}          # pseudo en minuscules -> id
+        self.images: dict[str, QPixmap] = {}   # id -> image
+        self.locale: tuple[str, QPixmap] | None = None  # votre photo, connue sans réseau
+
+    def pour(self, pseudo: str) -> QPixmap | None:
+        cle = pseudo.lower()
+        if self.locale and self.locale[0] == cle:
+            return self.locale[1]
+        return self.images.get(self.ids.get(cle, ""))
+
+    def definir_locale(self, pseudo: str, pix: QPixmap | None) -> None:
+        self.locale = (pseudo.lower(), pix) if pix is not None else None
+        self.modifie.emit(pseudo)
+
+    def mettre_a_jour(self, avatars: dict, base_http: str) -> None:
+        nouveaux = {str(p).lower(): str(i) for p, i in avatars.items()}
+        for pseudo in set(self.ids) | set(nouveaux):
+            id_ = nouveaux.get(pseudo)
+            if self.ids.get(pseudo) == id_:
+                continue
+            if id_ and id_ not in self.images:
+                self._telecharger(id_, base_http)
+            else:
+                self.modifie.emit(pseudo)
+        self.ids = nouveaux
+
+    def _telecharger(self, id_: str, base_http: str) -> None:
+        reponse = self.reseau.get(QNetworkRequest(QUrl(base_http + CHEMIN_AVATARS + id_)))
+
+        def fini() -> None:
+            pix = QPixmap()
+            if reponse.error() == QNetworkReply.NoError and pix.loadFromData(bytes(reponse.readAll())):
+                self.images[id_] = pix
+                for pseudo, i in self.ids.items():
+                    if i == id_:
+                        self.modifie.emit(pseudo)
+            reponse.deleteLater()
+
+        reponse.finished.connect(fini)
 
 
 class ClientSalon(QObject):
@@ -44,13 +99,17 @@ class ClientSalon(QObject):
         super().__init__(parent)
         self.url: str | None = None
         self.pseudo = ""
+        self.mot_de_passe = ""
+        self.nouveau = False
         self.deja_connecte = False
         self.ws = QWebSocket()
-        self.ws.connected.connect(lambda: self.ws.sendTextMessage(encoder("bonjour", pseudo=self.pseudo)))
+        self.ws.connected.connect(lambda: self.ws.sendTextMessage(encoder(
+            "bonjour", pseudo=self.pseudo, mot_de_passe=self.mot_de_passe, nouveau=self.nouveau)))
         self.ws.disconnected.connect(self._deconnecte)
         self.ws.textMessageReceived.connect(self._message)
         self.ws.bytesWritten.connect(self._ecrit)
         self.reseau = QNetworkAccessManager(self)
+        self.photos = Photos(self.reseau)
 
         self.file_envois: deque[Path] = deque()
         self.flux: BinaryIO | None = None
@@ -64,13 +123,15 @@ class ClientSalon(QObject):
 
     # --- Connexion ----------------------------------------------------------
 
-    def connecter(self, url: str, pseudo: str) -> None:
+    def connecter(self, url: str, pseudo: str, mot_de_passe: str, nouveau: bool) -> None:
         self.url, self.pseudo, self.deja_connecte = url, pseudo, False
+        self.mot_de_passe, self.nouveau = mot_de_passe, nouveau
         self.etat.emit("connexion…")
         self.ws.open(QUrl(url))
 
     def fermer(self) -> None:
         self.url = None
+        self.mot_de_passe = ""
         self._annuler_envois()
         self.ws.close()
 
@@ -94,12 +155,19 @@ class ClientSalon(QObject):
         type_ = m["type"]
         if type_ == "bienvenue":
             self.pseudo = m["pseudo"]
+            self.nouveau = False  # compte créé : les reconnexions sont de simples connexions
+            avatars = m.get("avatars") or {}
+            self.photos.mettre_a_jour(avatars, self.base_http)
+            self.photos.definir_locale(self.pseudo, reglages.photo())
+            self._synchroniser_photo(avatars.get(self.pseudo))
             self.etat.emit("en ligne")
             self.bienvenue.emit(self.pseudo, [] if self.deja_connecte else m.get("historique", []))
             self.deja_connecte = True
             self.membres.emit(m["membres"])
         elif type_ in ("message", "fichier"):
             self.recu.emit(m)
+        elif type_ == "avatars" and isinstance(m.get("avatars"), dict):
+            self.photos.mettre_a_jour(m["avatars"], self.base_http)
         elif type_ in ("arrivee", "depart"):
             verbe = "a rejoint" if type_ == "arrivee" else "a quitté"
             self.note.emit(f"{m['pseudo']} {verbe} le salon")
@@ -112,6 +180,18 @@ class ClientSalon(QObject):
                 self.note.emit(m.get("texte", "Erreur"))
 
     # --- Envoi --------------------------------------------------------------
+
+    def _synchroniser_photo(self, id_serveur: str | None) -> None:
+        """La photo de ce PC fait foi : on l'envoie si le salon en a une autre."""
+        donnees = reglages.octets_photo()
+        id_local = hashlib.sha256(donnees).hexdigest()[:16] if donnees else None
+        if id_local != id_serveur:
+            self.envoyer_photo(donnees)
+
+    def envoyer_photo(self, donnees: bytes | None) -> None:
+        if self.ws.isValid():
+            self.ws.sendTextMessage(encoder(
+                "avatar", donnees=base64.b64encode(donnees).decode() if donnees else None))
 
     def envoyer_texte(self, texte: str) -> bool:
         if not self.ws.isValid():

@@ -5,13 +5,16 @@ Usage :
     .venv/bin/python -m chat.serveur --port 9000
 
 Pas besoin de root. Les fichiers reçus sont gardés dans un dossier temporaire
-le temps de la session et servis en HTTP sur le même port.
+le temps de la session et servis en HTTP sur le même port. Les comptes et les
+photos de profil sont gardés dans ~/.local/share/LocalNet/ (voir comptes.py).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import binascii
 import email.utils
 import mimetypes
 import re
@@ -30,10 +33,11 @@ from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request, Response
 
+from .comptes import Comptes, ErreurCompte
 from .decouverte import ip_locale
 from .protocole import (
-    CHEMIN_FICHIERS, FICHIER_MAX, PORT_DEFAUT, TAILLE_ID, TAILLE_MAX, TAILLE_TRAME, TYPE_SERVICE,
-    decoder, encoder, genre, heure, nom_sur, pseudo_valide, taille_lisible,
+    CHEMIN_AVATARS, CHEMIN_FICHIERS, FICHIER_MAX, PORT_DEFAUT, TAILLE_ID, TAILLE_MAX, TAILLE_TRAME, TYPE_SERVICE,
+    decoder, encoder, genre, heure, nom_sur, taille_lisible,
 )
 
 _ID_CLIENT = re.compile(rf"[0-9a-f]{{{TAILLE_ID}}}")
@@ -55,8 +59,9 @@ class Envoi:
 
 
 class Salon:
-    def __init__(self, dossier: Path, taille_historique: int = 80):
+    def __init__(self, dossier: Path, comptes: Comptes, taille_historique: int = 80):
         self.dossier = dossier
+        self.comptes = comptes
         self.membres: dict[str, ServerConnection] = {}
         self.historique: deque[dict] = deque(maxlen=taille_historique)
         self.fichiers: dict[str, tuple[Path, str]] = {}  # id -> (chemin, nom)
@@ -84,7 +89,7 @@ class Salon:
         envois: dict[bytes, Envoi] = {}
         journal(f"+ {pseudo} ({ws.remote_address[0]}) — {len(self.membres)} en ligne")
         await ws.send(encoder("bienvenue", pseudo=pseudo, membres=self.liste(),
-                              historique=list(self.historique)))
+                              historique=list(self.historique), avatars=self.comptes.avatars()))
         self.diffuser(encoder("arrivee", pseudo=pseudo, heure=heure(), membres=self.liste()), sauf=pseudo)
         try:
             async for brut in ws:
@@ -108,20 +113,40 @@ class Salon:
         except (TimeoutError, ConnectionClosed):
             return None
 
-        pseudo = message.get("pseudo") if message and message["type"] == "bonjour" else None
-        if not pseudo_valide(pseudo):
-            erreur = "Pseudo invalide : 1 à 20 caractères parmi lettres, chiffres, « . », « _ », « - »."
-        elif any(p.lower() == pseudo.lower() for p in self.membres):
-            erreur = f"Le pseudo « {pseudo} » est déjà pris."
-        else:
+        if not message or message["type"] != "bonjour":
+            await ws.close()
+            return None
+        pseudo, mdp = message.get("pseudo"), message.get("mot_de_passe")
+        try:
+            if message.get("nouveau") is True:
+                pseudo = self.comptes.creer(pseudo, mdp)
+                journal(f"  compte créé : {pseudo}")
+            else:
+                # scrypt prend ~50 ms : hors de la boucle pour ne pas bloquer le salon.
+                pseudo = await asyncio.to_thread(self.comptes.verifier, pseudo, mdp)
+            if any(p.lower() == pseudo.lower() for p in self.membres):
+                raise ErreurCompte(f"« {pseudo} » est déjà connecté.")
             return pseudo
+        except ErreurCompte as e:
+            erreur = str(e)
+            await asyncio.sleep(1)  # freine les essais de mots de passe à la chaîne
         await ws.send(encoder("erreur", texte=erreur, fatal=True))
         await ws.close()
         return None
 
     async def _traiter(self, pseudo: str, ws: ServerConnection, envois: dict[bytes, Envoi],
                        message: dict) -> None:
-        if message["type"] == "message":
+        if message["type"] == "avatar":
+            donnees = message.get("donnees")
+            try:
+                brut = None if donnees is None else base64.b64decode(str(donnees), validate=True)
+                self.comptes.definir_avatar(pseudo, brut)
+            except (ErreurCompte, binascii.Error) as e:
+                await self._erreur(ws, str(e) if isinstance(e, ErreurCompte) else "Photo illisible.")
+                return
+            self.diffuser(encoder("avatars", avatars=self.comptes.avatars()))
+
+        elif message["type"] == "message":
             texte = message.get("texte")
             if not isinstance(texte, str) or not texte.strip():
                 return
@@ -171,11 +196,15 @@ class Salon:
     # --- Téléchargement HTTP ------------------------------------------------
 
     async def servir_fichier(self, connexion: ServerConnection, requete: Request) -> Response | None:
-        """GET /fichiers/<id> -> contenu ; toute autre requête continue en WebSocket."""
+        """GET /fichiers/<id> ou /avatars/<id> -> contenu ; le reste continue en WebSocket."""
         chemin = requete.path.split("?", 1)[0]
-        if not chemin.startswith(CHEMIN_FICHIERS):
+        if chemin.startswith(CHEMIN_AVATARS):
+            photo = self.comptes.chemin_avatar(chemin.removeprefix(CHEMIN_AVATARS))
+            fichier = (photo, "avatar.jpg") if photo else None
+        elif chemin.startswith(CHEMIN_FICHIERS):
+            fichier = self.fichiers.get(chemin.removeprefix(CHEMIN_FICHIERS))
+        else:
             return None
-        fichier = self.fichiers.get(chemin.removeprefix(CHEMIN_FICHIERS))
         if fichier is None:
             return connexion.respond(404, "Fichier introuvable.\n")
         contenu = await asyncio.to_thread(fichier[0].read_bytes)
@@ -208,7 +237,7 @@ async def annoncer(ip: str, port: int):
 async def lancer(args: argparse.Namespace) -> None:
     ip = ip_locale()
     dossier = Path(tempfile.mkdtemp(prefix="localnet-"))
-    salon = Salon(dossier)
+    salon = Salon(dossier, Comptes(args.donnees))
     try:
         async with serve(salon.accueillir, "0.0.0.0", args.port, max_size=TAILLE_TRAME,
                          process_request=salon.servir_fichier) as serveur:
@@ -235,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Serveur du salon LocalNet.")
     p.add_argument("-p", "--port", type=int, default=PORT_DEFAUT, help=f"port (défaut : {PORT_DEFAUT})")
     p.add_argument("--sans-annonce", action="store_true", help="ne pas s'annoncer en mDNS")
+    p.add_argument("--donnees", type=Path, help="dossier des comptes (défaut : ~/.local/share/LocalNet)")
     args = p.parse_args(argv)
     try:
         asyncio.run(lancer(args))
