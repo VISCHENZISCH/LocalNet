@@ -1,4 +1,5 @@
-"""Réglages de ce PC : thème, dernier nom d'utilisateur, photo de profil.
+"""Réglages de ce PC : thème, dernier nom d'utilisateur, photo de profil,
+empreintes des certificats des salons déjà rejoints.
 
 Le mot de passe n'est jamais enregistré.
 """
@@ -23,6 +24,15 @@ def lire(cle: str, defaut: str = "") -> str:
 
 def ecrire(cle: str, valeur: str) -> None:
     _reglages().setValue(cle, valeur)
+
+
+def empreinte(salon: str) -> str:
+    """Empreinte du certificat retenue pour « hôte:port », ou « »."""
+    return lire(f"certificats/{salon}")
+
+
+def retenir_empreinte(salon: str, empreinte_: str) -> None:
+    ecrire(f"certificats/{salon}", empreinte_)
 
 
 def _chemin_photo() -> Path:

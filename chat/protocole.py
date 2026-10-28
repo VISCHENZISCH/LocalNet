@@ -1,5 +1,9 @@
 """Protocole du salon : JSON sur WebSocket, fichiers en trames binaires.
 
+Tout passe par un seul port en TLS (certificat auto-signé, voir tls.py) :
+    wss://<serveur>:8765/ws     le salon
+    https://<serveur>:8765/     client web (téléphones), servi par le salon
+
 Client -> serveur
     {"type": "bonjour", "pseudo", "mot_de_passe", "nouveau": bool}
         premier message, obligatoire ; nouveau = créer le compte sur ce salon
@@ -14,9 +18,14 @@ Serveur -> client
     {"type": "avatars", "avatars": {pseudo: id}}            photo à GET /avatars/<id>
     {"type": "message", "de", "texte", "heure"}
     {"type": "fichier", "de", "id", "nom", "taille", "genre", "heure"}
-        genre : "image" | "video" ; contenu à GET http://<serveur>/fichiers/<id>
+        genre : "image" | "video" ; contenu à GET https://<serveur>/fichiers/<id>
+        (le fichier peut avoir été supprimé depuis, si le salon a dépassé son quota)
     {"type": "arrivee" | "depart", "pseudo", "heure", "membres"}
-    {"type": "erreur", "texte", "fatal"}                    fatal : connexion fermée
+    {"type": "erreur", "texte", "fatal"}                    fatal : connexion fermée,
+        ne pas se reconnecter (mauvais mot de passe, compte ouvert ailleurs…)
+
+Un compte n'est connecté qu'une fois : une nouvelle connexion réussie remplace
+l'ancienne, qui reçoit une erreur fatale.
 """
 
 from __future__ import annotations
@@ -25,9 +34,12 @@ import json
 import re
 from datetime import datetime
 from pathlib import PurePath
+from typing import TypeGuard
 
 TYPE_SERVICE = "_localnet-chat._tcp.local."  # annonce mDNS du salon
+VERSION = "3"  # annoncée en mDNS ; 3 = TLS + client web
 PORT_DEFAUT = 8765
+CHEMIN_WS = "/ws"
 TAILLE_MAX = 2000  # caractères par message
 TAILLE_TRAME = 1024 * 1024  # octets par trame WebSocket
 TAILLE_MORCEAU = 256 * 1024  # octets de fichier par trame binaire
@@ -36,6 +48,7 @@ FICHIER_MAX = 500 * 1024 * 1024
 CHEMIN_FICHIERS = "/fichiers/"
 CHEMIN_AVATARS = "/avatars/"
 AVATAR_MAX = 400 * 1024  # octets ; le client envoie une photo 256×256
+QUOTA_DEFAUT = 5 * 1024**3  # octets de fichiers gardés par le salon ; au-delà, les plus anciens partent
 
 EXTENSIONS = {
     "image": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"},
@@ -45,11 +58,11 @@ EXTENSIONS = {
 _PSEUDO = re.compile(r"[\w.-]{1,20}")
 
 
-def pseudo_valide(pseudo: object) -> bool:
+def pseudo_valide(pseudo: object) -> TypeGuard[str]:
     return isinstance(pseudo, str) and _PSEUDO.fullmatch(pseudo) is not None
 
 
-def mot_de_passe_valide(mdp: object) -> bool:
+def mot_de_passe_valide(mdp: object) -> TypeGuard[str]:
     return isinstance(mdp, str) and 4 <= len(mdp) <= 64
 
 
@@ -86,8 +99,9 @@ def heure() -> str:
 
 
 def taille_lisible(octets: int) -> str:
+    taille = float(octets)
     for unite in ("o", "Ko", "Mo"):
-        if octets < 1024:
-            return f"{octets:.0f} {unite}"
-        octets /= 1024
-    return f"{octets:.1f} Go"
+        if taille < 1024:
+            return f"{taille:.0f} {unite}"
+        taille /= 1024
+    return f"{taille:.1f} Go"

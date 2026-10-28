@@ -223,7 +223,7 @@ class Accueil(QWidget):
             self.liste.addWidget(label("Aucun salon annoncé pour l'instant.", "petit"))
             return
         for nom, url in salons:
-            ip = url.removeprefix("ws://").removesuffix(f":{PORT_DEFAUT}")
+            ip = url.removeprefix("wss://").removesuffix(f":{PORT_DEFAUT}")
             b = bouton(f"{nom}  ·  {ip}", "salon", icone="wifi")
             b.setToolTip("Utiliser ce salon")
             b.clicked.connect(lambda _=False, a=ip: self.adresse.setText(a))

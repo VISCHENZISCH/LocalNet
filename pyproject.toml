@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "localnet"
+version = "0.3.0"
+description = "Discussion et partage de photos et vidéos entre les appareils d'un même réseau local"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.10,<4",
+    "cryptography>=42",
+    "zeroconf>=0.130",
+    "PySide6>=6.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pyinstaller>=6.10",
+]
+
+[project.scripts]
+localnet-serveur = "chat.serveur:main"
+
+[project.gui-scripts]
+localnet = "desktop.app:main"
+
+[tool.setuptools]
+packages = ["chat", "desktop"]
+
+[tool.setuptools.package-data]
+chat = ["web/*"]
+desktop = ["ressources/*.svg", "ressources/icones/*", "ressources/polices/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM", "ASYNC"]
+ignore = [
+    "E731",    # lambdas nommées, utilisées pour les petits rappels Qt
+    "E741",    # « l » pour un QLabel
+    "SIM105",  # try/except/pass lisible tel quel
+    "B023",    # rappels Qt qui capturent la variable de boucle volontairement
+]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["chat"]
+ignore_missing_imports = true
+check_untyped_defs = true

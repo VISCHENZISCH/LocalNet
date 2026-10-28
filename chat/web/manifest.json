@@ -1,0 +1,12 @@
+{
+  "name": "LocalNet",
+  "short_name": "LocalNet",
+  "description": "Discussion et partage de photos et vidéos sur le réseau local",
+  "lang": "fr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#F0F2F5",
+  "theme_color": "#1877F2",
+  "icons": [{"src": "/web/logo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}]
+}

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#F0F2F5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#18191A" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="LocalNet">
+<title>LocalNet</title>
+<link rel="icon" href="/web/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/web/logo.svg">
+<link rel="manifest" href="/web/manifest.json">
+<link rel="stylesheet" href="/web/style.css">
+<script src="/web/app.js" defer></script>
+</head>
+<body>
+
+<!-- Connexion -->
+<main id="connexion" class="ecran">
+  <div class="carte connexion">
+    <div class="marque">
+      <img src="/web/logo.svg" alt="" width="56" height="56">
+      <div>
+        <h1>LocalNet</h1>
+        <p class="doux">Salon <span id="hote"></span></p>
+      </div>
+    </div>
+    <div class="onglets" role="tablist">
+      <button type="button" role="tab" id="onglet-connexion" aria-selected="true">Se connecter</button>
+      <button type="button" role="tab" id="onglet-creation" aria-selected="false">Créer un compte</button>
+    </div>
+    <form id="formulaire" autocomplete="on">
+      <input id="pseudo" name="username" placeholder="Nom d'utilisateur" maxlength="20" required
+             autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <input id="mdp" name="password" type="password" placeholder="Mot de passe" minlength="4" maxlength="64"
+             required autocomplete="current-password">
+      <button type="submit" class="principal" id="valider">Se connecter</button>
+      <p id="erreur" class="erreur" role="alert" hidden></p>
+    </form>
+    <p class="petit doux">Le compte appartient à ce salon : c'est le même que sur l'application de bureau.</p>
+  </div>
+</main>
+
+<!-- Salon -->
+<main id="salon" class="ecran" hidden>
+  <header class="barre">
+    <button type="button" class="icone" id="ouvrir-profil" aria-label="Profil et paramètres">
+      <span class="avatar" id="mon-avatar"></span>
+    </button>
+    <div class="titre">
+      <strong id="titre-salon">Salon</strong>
+      <span class="petit doux" id="etat">connexion…</span>
+    </div>
+    <button type="button" class="pastille" id="ouvrir-membres" aria-label="Membres en ligne">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      <span id="nb-membres">0</span>
+    </button>
+  </header>
+
+  <section id="fil" aria-live="polite"></section>
+
+  <div id="envoi" hidden>
+    <span id="envoi-nom" class="petit"></span>
+    <progress id="envoi-barre" max="100" value="0"></progress>
+  </div>
+
+  <form id="saisie" class="saisie">
+    <label class="icone" aria-label="Envoyer une photo ou une vidéo">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+      <input type="file" id="fichiers" accept="image/*,video/*" multiple hidden>
+    </label>
+    <textarea id="texte" rows="1" maxlength="2000" placeholder="Écrire un message…" enterkeyhint="send"></textarea>
+    <button type="submit" class="icone envoyer" aria-label="Envoyer">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.714 3.048a.498.498 0 0 0-.683.627l2.843 7.627a2 2 0 0 1 0 1.396l-2.842 7.627a.498.498 0 0 0 .682.627l18-8.5a.5.5 0 0 0 0-.904z"/><path d="M6 12h16"/></svg>
+    </button>
+  </form>
+</main>
+
+<!-- Membres -->
+<dialog id="membres" class="feuille">
+  <h2>En ligne</h2>
+  <ul id="liste-membres"></ul>
+  <button type="button" class="secondaire" data-fermer>Fermer</button>
+</dialog>
+
+<!-- Profil -->
+<dialog id="profil" class="feuille">
+  <h2>Profil</h2>
+  <div class="profil">
+    <span class="avatar grand" id="profil-avatar"></span>
+    <div class="actions">
+      <strong id="profil-nom"></strong>
+      <label class="bouton principal">Choisir une photo
+        <input type="file" id="photo" accept="image/*" hidden>
+      </label>
+      <button type="button" class="secondaire" id="retirer-photo">Retirer la photo</button>
+    </div>
+  </div>
+  <button type="button" class="danger" id="quitter">Quitter le salon</button>
+  <button type="button" class="secondaire" data-fermer>Fermer</button>
+</dialog>
+
+</body>
+</html>

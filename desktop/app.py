@@ -9,9 +9,10 @@ import sys
 
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QFont, QIcon
-from PySide6.QtWidgets import QApplication, QMainWindow, QStackedLayout
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QStackedLayout
 
 from chat.protocole import PORT_DEFAUT
+from chat.tls import empreinte_lisible
 
 from . import reglages, theme
 from .accueil import Accueil
@@ -47,6 +48,7 @@ class Fenetre(QMainWindow):
         self.salon.quitter.connect(self.quitter)
         self.client.bienvenue.connect(self._entre)
         self.client.refuse.connect(self._refuse)
+        self.client.certificat_change.connect(self._certificat_change)
         self.serveur.pret.connect(self._salon_pret)
         self.serveur.echec.connect(self._echec_serveur)
 
@@ -62,7 +64,7 @@ class Fenetre(QMainWindow):
     def _salon_pret(self) -> None:
         self.accueil.hebergement_fini()
         if self.hote:
-            self.rejoindre(f"ws://{self.accueil.ip}:{PORT_DEFAUT}", *self.hote, "ce PC")
+            self.rejoindre(f"wss://{self.accueil.ip}:{PORT_DEFAUT}", *self.hote, "ce PC")
             self.hote = None
 
     def _entre(self) -> None:
@@ -84,6 +86,26 @@ class Fenetre(QMainWindow):
     def _refuse(self, texte: str) -> None:
         self.pages.setCurrentWidget(self.accueil)
         self.accueil.erreur(texte)
+
+    def _certificat_change(self, salon: str, empreinte: str) -> None:
+        """Le salon présente un autre certificat que la dernière fois : on demande avant de continuer."""
+        reponse = QMessageBox.warning(
+            self, "Certificat du salon modifié",
+            f"Le salon {salon} ne présente plus le même certificat que lors de votre dernière visite.\n\n"
+            "C'est normal si le PC hôte a été réinstallé ou si ses données LocalNet ont été effacées, "
+            "ou si cette adresse IP appartient maintenant à un autre PC. Sinon, quelqu'un essaie peut-être "
+            "d'intercepter la connexion.\n\n"
+            f"Nouvelle empreinte : {empreinte_lisible(empreinte)}\n"
+            "(affichée au lancement du salon sur le PC hôte)\n\n"
+            "Faire confiance à ce certificat ?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reponse != QMessageBox.Yes:
+            self.client.fermer()
+            self._refuse("Connexion annulée : certificat du salon non reconnu.")
+            return
+        reglages.retenir_empreinte(salon, empreinte)
+        c = self.client
+        self.rejoindre(f"wss://{salon}", c.pseudo, c.mot_de_passe, c.nouveau, self.salon.nom_salon.text())
 
     def _echec_serveur(self, texte: str) -> None:
         self.hote = None

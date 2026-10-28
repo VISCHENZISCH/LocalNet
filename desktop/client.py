@@ -1,34 +1,38 @@
 """Connexion au salon (QWebSocket), envoi et réception de photos/vidéos.
 
 Les fichiers partent en morceaux au fil de l'eau (jamais entièrement en
-mémoire) et sont téléchargés en HTTP depuis le serveur, avec un cache local.
+mémoire) et sont téléchargés en HTTPS depuis le serveur, avec un cache local.
+
+Le certificat du salon est auto-signé : son empreinte est retenue à la première
+connexion, puis vérifiée à chaque connexion et à chaque téléchargement.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
-import os
 import secrets
-import signal
-import sys
+import threading
 from collections import deque
 from pathlib import Path
-from typing import BinaryIO, Callable
+from typing import BinaryIO
+from collections.abc import Callable
 
-from PySide6.QtCore import QObject, QProcess, QStandardPaths, QTimer, QUrl, Signal
+from PySide6.QtCore import QCryptographicHash, QObject, QStandardPaths, QTimer, QUrl, Signal
 from PySide6.QtGui import QPixmap
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from PySide6.QtNetwork import (
+    QNetworkAccessManager, QNetworkReply, QNetworkRequest, QSslCertificate, QSslError,
+)
 from PySide6.QtWebSockets import QWebSocket
 
+from chat import serveur
 from chat.protocole import (
-    CHEMIN_AVATARS, CHEMIN_FICHIERS, FICHIER_MAX, TAILLE_MORCEAU, decoder, encoder, genre, nom_sur,
-    taille_lisible,
+    CHEMIN_AVATARS, CHEMIN_FICHIERS, CHEMIN_WS, FICHIER_MAX, PORT_DEFAUT, TAILLE_MORCEAU, decoder, encoder,
+    genre, nom_sur, taille_lisible,
 )
 
 from . import reglages
-
-RACINE = Path(__file__).resolve().parent.parent
 
 
 def dossier_cache() -> Path:
@@ -94,6 +98,7 @@ class ClientSalon(QObject):
     etat = Signal(str)             # « connexion… », « en ligne », « hors ligne »
     refuse = Signal(str)           # connexion refusée (pseudo pris…)
     envoi = Signal(str, int, int)  # nom, octets envoyés, total ; total 0 = terminé
+    certificat_change = Signal(str, str)  # salon (hôte:port), nouvelle empreinte
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -102,13 +107,16 @@ class ClientSalon(QObject):
         self.mot_de_passe = ""
         self.nouveau = False
         self.deja_connecte = False
+        self.certificat_refuse: str | None = None  # empreinte inattendue vue à la dernière tentative
         self.ws = QWebSocket()
         self.ws.connected.connect(lambda: self.ws.sendTextMessage(encoder(
             "bonjour", pseudo=self.pseudo, mot_de_passe=self.mot_de_passe, nouveau=self.nouveau)))
         self.ws.disconnected.connect(self._deconnecte)
         self.ws.textMessageReceived.connect(self._message)
         self.ws.bytesWritten.connect(self._ecrit)
+        self.ws.sslErrors.connect(self._erreurs_ssl_ws)
         self.reseau = QNetworkAccessManager(self)
+        self.reseau.sslErrors.connect(self._erreurs_ssl_http)
         self.photos = Photos(self.reseau)
 
         self.file_envois: deque[Path] = deque()
@@ -119,15 +127,53 @@ class ClientSalon(QObject):
 
     @property
     def base_http(self) -> str:
-        return (self.url or "").replace("ws://", "http://", 1)
+        return (self.url or "").replace("wss://", "https://", 1)
+
+    @property
+    def salon(self) -> str:
+        """« hôte:port », clé de l'empreinte retenue."""
+        url = QUrl(self.url or "")
+        return f"{url.host()}:{url.port(PORT_DEFAUT)}"
+
+    # --- Certificat ---------------------------------------------------------
+
+    def _empreinte_attendue(self, certificat: QSslCertificate) -> bool:
+        """Première connexion : on retient l'empreinte. Ensuite : elle doit être la même."""
+        empreinte = bytes(certificat.digest(QCryptographicHash.Sha256).toHex()).decode()
+        connue = reglages.empreinte(self.salon)
+        if certificat.isNull() or (connue and connue != empreinte):
+            self.certificat_refuse = empreinte
+            return False
+        if not connue:
+            reglages.retenir_empreinte(self.salon, empreinte)
+        return True
+
+    def _erreurs_ssl_ws(self, erreurs: list[QSslError]) -> None:
+        certificat = self.ws.sslConfiguration().peerCertificate()
+        if certificat.isNull():
+            certificat = next((e.certificate() for e in erreurs if not e.certificate().isNull()), certificat)
+        if self._empreinte_attendue(certificat):
+            self.ws.ignoreSslErrors()
+
+    def _erreurs_ssl_http(self, reponse: QNetworkReply, _erreurs: list[QSslError]) -> None:
+        certificat = reponse.sslConfiguration().peerCertificate()
+        empreinte = bytes(certificat.digest(QCryptographicHash.Sha256).toHex()).decode()
+        if not certificat.isNull() and empreinte == reglages.empreinte(self.salon):
+            reponse.ignoreSslErrors()
 
     # --- Connexion ----------------------------------------------------------
 
     def connecter(self, url: str, pseudo: str, mot_de_passe: str, nouveau: bool) -> None:
         self.url, self.pseudo, self.deja_connecte = url, pseudo, False
         self.mot_de_passe, self.nouveau = mot_de_passe, nouveau
+        self._ouvrir()
+
+    def _ouvrir(self) -> None:
+        if not self.url:
+            return
+        self.certificat_refuse = None
         self.etat.emit("connexion…")
-        self.ws.open(QUrl(url))
+        self.ws.open(QUrl(self.url + CHEMIN_WS))
 
     def fermer(self) -> None:
         self.url = None
@@ -140,13 +186,17 @@ class ClientSalon(QObject):
         self.membres.emit([])
         if not self.url:
             return
+        if self.certificat_refuse:
+            salon, self.url = self.salon, None
+            self.certificat_change.emit(salon, self.certificat_refuse)
+            return
         if not self.deja_connecte:  # jamais entré : adresse fausse ou salon fermé
             raison = self.ws.errorString() or "salon injoignable"
             self.url = None
             self.refuse.emit(f"Connexion impossible : {raison}")
             return
         self.etat.emit("hors ligne — reconnexion…")
-        QTimer.singleShot(3000, lambda: self.url and self.ws.open(QUrl(self.url)))
+        QTimer.singleShot(3000, self._ouvrir)
 
     def _message(self, brut: str) -> None:
         m = decoder(brut)
@@ -182,10 +232,10 @@ class ClientSalon(QObject):
     # --- Envoi --------------------------------------------------------------
 
     def _synchroniser_photo(self, id_serveur: str | None) -> None:
-        """La photo de ce PC fait foi : on l'envoie si le salon en a une autre."""
+        """La photo de ce PC fait foi : on l'envoie si le salon en a une autre.
+        Sans photo sur ce PC, on garde celle du salon (choisie depuis un téléphone, par exemple)."""
         donnees = reglages.octets_photo()
-        id_local = hashlib.sha256(donnees).hexdigest()[:16] if donnees else None
-        if id_local != id_serveur:
+        if donnees and hashlib.sha256(donnees).hexdigest()[:16] != id_serveur:
             self.envoyer_photo(donnees)
 
     def envoyer_photo(self, donnees: bytes | None) -> None:
@@ -283,46 +333,48 @@ class ClientSalon(QObject):
 
 
 class ServeurLocal(QObject):
-    """Salon hébergé sur ce PC (`python -m chat.serveur` en processus séparé)."""
+    """Salon hébergé sur ce PC : le serveur tourne dans un thread de l'application."""
 
     pret = Signal()
     echec = Signal(str)
 
-    def __init__(self, parent: QObject | None = None):
+    def __init__(self, parent: QObject | None = None, port: int = PORT_DEFAUT, annonce: bool = True):
         super().__init__(parent)
-        self.proc: QProcess | None = None
+        self.port, self.annonce = port, annonce
+        self.thread: threading.Thread | None = None
+        self.boucle: asyncio.AbstractEventLoop | None = None
+        self.arret: asyncio.Event | None = None
+        self.demarre = threading.Event()  # boucle et événement d'arrêt prêts
 
     @property
     def actif(self) -> bool:
-        return self.proc is not None and self.proc.state() != QProcess.NotRunning
+        return self.thread is not None and self.thread.is_alive()
 
     def demarrer(self) -> None:
         if self.actif:
             self.pret.emit()
             return
-        self.proc = QProcess(self)
-        self.proc.setWorkingDirectory(str(RACINE))
-        self.proc.setProcessChannelMode(QProcess.MergedChannels)
-        self.proc.setProgram(sys.executable)
-        self.proc.setArguments(["-u", "-m", "chat.serveur"])
-        sortie = []
+        self.demarre.clear()
+        self.thread = threading.Thread(target=self._executer, name="salon", daemon=True)
+        self.thread.start()
 
-        def lire() -> None:
-            texte = bytes(self.proc.readAll()).decode("utf-8", "replace")
-            sortie.append(texte)
-            if "Salon ouvert" in texte:
-                self.pret.emit()
+    def _executer(self) -> None:
+        async def principal() -> None:
+            self.boucle, self.arret = asyncio.get_running_loop(), asyncio.Event()
+            self.demarre.set()
+            await serveur.lancer(self.port, self.annonce, pret=self.pret.emit, arret=self.arret)
 
-        self.proc.readyRead.connect(lire)
-        self.proc.finished.connect(lambda code, _s: code and self.echec.emit(
-            ("".join(sortie).strip().splitlines() or [f"code {code}"])[-1]))
-        self.proc.start()
+        try:
+            asyncio.run(principal())
+        except Exception as e:  # port déjà pris, certificat illisible…
+            self.echec.emit(str(e) or type(e).__name__)
+        finally:
+            self.demarre.set()
 
     def arreter(self) -> None:
-        if self.actif:
-            self.proc.finished.disconnect()  # arrêt voulu : pas un échec
-            # SIGINT : le serveur retire son annonce mDNS et vide son dossier temporaire.
-            os.kill(self.proc.processId(), signal.SIGINT)
-            if not self.proc.waitForFinished(5000):
-                self.proc.kill()
-                self.proc.waitForFinished(1000)
+        """Ferme le salon proprement : membres prévenus, annonce mDNS retirée, fichiers supprimés."""
+        if not self.actif or not self.demarre.wait(5):
+            return
+        if self.boucle and self.arret and not self.boucle.is_closed():
+            self.boucle.call_soon_threadsafe(self.arret.set)
+        self.thread.join(5)

@@ -3,6 +3,7 @@
 Gardés sur le PC qui héberge le salon, dans `~/.local/share/LocalNet/` :
     comptes.json        {clé en minuscules: {"pseudo", "sel", "empreinte", "avatar"}}
     avatars/<id>        photos, nommées par l'empreinte de leur contenu
+    tls/                certificat du salon (voir tls.py)
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import os
 import re
 import secrets
 import sys
+import threading
 from pathlib import Path
 
 from .protocole import AVATAR_MAX, mot_de_passe_valide, pseudo_valide
@@ -44,6 +46,7 @@ class Comptes:
         self.dossier_avatars = self.dossier / "avatars"
         self.dossier_avatars.mkdir(parents=True, exist_ok=True)
         self.fichier = self.dossier / "comptes.json"
+        self.verrou = threading.Lock()  # creer() tourne dans un thread du serveur
         try:
             self.comptes: dict[str, dict] = json.loads(self.fichier.read_text())
         except (OSError, ValueError):
@@ -55,18 +58,20 @@ class Comptes:
         os.chmod(temporaire, 0o600)
         temporaire.replace(self.fichier)
 
-    def creer(self, pseudo: str, mot_de_passe: str) -> str:
+    def creer(self, pseudo: object, mot_de_passe: object) -> str:
         if not pseudo_valide(pseudo):
             raise ErreurCompte("Nom d'utilisateur invalide : 1 à 20 caractères parmi lettres, "
                                "chiffres, « . », « _ », « - ».")
         if not mot_de_passe_valide(mot_de_passe):
             raise ErreurCompte("Le mot de passe doit faire de 4 à 64 caractères.")
-        if pseudo.lower() in self.comptes:
-            raise ErreurCompte(f"Le nom « {pseudo} » est déjà utilisé sur ce salon.")
         sel = secrets.token_bytes(16)
-        self.comptes[pseudo.lower()] = {"pseudo": pseudo, "sel": sel.hex(),
-                                        "empreinte": _hacher(mot_de_passe, sel).hex(), "avatar": None}
-        self._sauver()
+        empreinte = _hacher(mot_de_passe, sel).hex()
+        with self.verrou:
+            if pseudo.lower() in self.comptes:
+                raise ErreurCompte(f"Le nom « {pseudo} » est déjà utilisé sur ce salon.")
+            self.comptes[pseudo.lower()] = {"pseudo": pseudo, "sel": sel.hex(),
+                                            "empreinte": empreinte, "avatar": None}
+            self._sauver()
         return pseudo
 
     def verifier(self, pseudo: object, mot_de_passe: object) -> str:
@@ -82,14 +87,15 @@ class Comptes:
     def definir_avatar(self, pseudo: str, donnees: bytes | None) -> None:
         if donnees is not None and (len(donnees) > AVATAR_MAX or not donnees.startswith(_SIGNATURES)):
             raise ErreurCompte("Photo de profil refusée (JPEG ou PNG, 400 Ko max.).")
-        compte = self.comptes[pseudo.lower()]
-        if donnees is None:
-            compte["avatar"] = None
-        else:
-            id_ = hashlib.sha256(donnees).hexdigest()[:16]
-            (self.dossier_avatars / id_).write_bytes(donnees)
-            compte["avatar"] = id_
-        self._sauver()
+        with self.verrou:
+            compte = self.comptes[pseudo.lower()]
+            if donnees is None:
+                compte["avatar"] = None
+            else:
+                id_ = hashlib.sha256(donnees).hexdigest()[:16]
+                (self.dossier_avatars / id_).write_bytes(donnees)
+                compte["avatar"] = id_
+            self._sauver()
 
     def avatars(self) -> dict[str, str]:
         return {c["pseudo"]: c["avatar"] for c in self.comptes.values() if c.get("avatar")}

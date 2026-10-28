@@ -21,16 +21,16 @@ def ip_locale() -> str:
 
 def decouvrir(duree: float = 2.0) -> list[tuple[str, str]]:
     """Cherche les salons annoncés en mDNS ; renvoie [(nom, url)]."""
-    from zeroconf import IPVersion, ServiceBrowser, Zeroconf
+    from zeroconf import IPVersion, ServiceBrowser, ServiceListener, Zeroconf
 
     trouves: dict[str, str] = {}
 
-    class Ecouteur:
+    class Ecouteur(ServiceListener):
         def add_service(self, zc, type_, nom):
             info = zc.get_service_info(type_, nom, timeout=1500)
             if info:
                 for ip in info.parsed_addresses(IPVersion.V4Only):
-                    trouves[nom] = f"ws://{ip}:{info.port}"
+                    trouves[nom] = f"wss://{ip}:{info.port}"
 
         def update_service(self, zc, type_, nom):
             pass
@@ -48,10 +48,12 @@ def decouvrir(duree: float = 2.0) -> list[tuple[str, str]]:
 
 
 def normaliser(adresse: str) -> str:
-    """« 192.168.1.74 » -> « ws://192.168.1.74:8765 »."""
-    adresse = adresse.strip()
+    """« 192.168.1.74 » -> « wss://192.168.1.74:8765 » (« https:// » collé depuis un navigateur aussi)."""
+    adresse = adresse.strip().rstrip("/")
+    for prefixe in ("https://", "http://", "ws://"):
+        adresse = adresse.removeprefix(prefixe)
     if "://" not in adresse:
-        adresse = f"ws://{adresse}"
+        adresse = f"wss://{adresse}"
     if urlparse(adresse).port is None:
         adresse = f"{adresse.rstrip('/')}:{PORT_DEFAUT}"
     return adresse

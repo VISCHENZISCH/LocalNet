@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 from PySide6.QtCore import QSize, QStandardPaths, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
@@ -17,7 +17,7 @@ from chat.protocole import EXTENSIONS, taille_lisible
 
 from . import theme
 from .client import ClientSalon
-from .widgets import Avatar, Carte, arrondir, bouton, bouton_icone, label
+from .widgets import Avatar, Carte, arrondir, bouton_icone, label
 
 LARGEUR_BULLE = 460
 IMAGE_MAX = QSize(420, 320)
@@ -200,7 +200,7 @@ class Salon(QWidget):
         self._vider_fil()
         self.dernier_auteur = None
         self.nom_salon.setText(nom)
-        self.adresse.setText(url.removeprefix("ws://"))
+        self.adresse.setText(url.removeprefix("wss://"))
         self.titre.setText(f"Salon · {nom}")
         self.mon_nom.setText(pseudo)
         self.mon_avatar.changer(pseudo)
